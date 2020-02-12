@@ -14,3 +14,4 @@ Route::group([
     $router->get('users', 'UsersController@index')->name('admin.user.index');
 
 });
+
