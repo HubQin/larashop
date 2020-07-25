@@ -7,101 +7,56 @@ use App\Models\OrderItem;
 use App\Models\Product;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
+use App\SearchBuilders\ProductSearchBuilder;
 use App\Models\Category;
 
 class ProductsController extends Controller
 {
     public function index(Request $request){
-        $search = $request->input('search', '');
-        $request->input('category_id') && $category = Category::find($request->input('category_id'));
-
         $page    = $request->input('page', 1);
         $perPage = 16;
 
-        $params = [
-            'index' => 'products',
-            'body'  => [
-                'from'  => ($page - 1) * $perPage,
-                'size'  => $perPage,
-                'query' => [
-                    'bool' => [
-                        'filter' => [
-                            ['term' => ['on_sale' => true]],
-                        ],
-                    ],
-                ],
-            ],
-        ];
+        $builder = (new ProductSearchBuilder())->onSale()->paginate($perPage, $page);
 
-        // 只有当用户有输入搜索词或者使用了类目筛选的时候才会做聚合
+
+        if ($request->input('category_id') && $category = Category::find($request->input('category_id'))) {
+            // 调用查询构造器的类目筛选
+            $builder->category($category);
+        }
+
+        if ($search = $request->input('search', '')) {
+            $keywords = array_filter(explode(' ', $search));
+            // 调用查询构造器的关键词筛选
+            $builder->keywords($keywords);
+        }
+
         if ($search || isset($category)) {
-            $params['body']['aggs'] = [
-                'properties' => [
-                    'nested' => [
-                        'path' => 'properties',
-                    ],
-                    'aggs'   => [
-                        'properties' => [
-                            'terms' => [
-                                'field' => 'properties.name',
-                            ],
-                            'aggs'  => [
-                                'value' => [
-                                    'terms' => [
-                                        'field' => 'properties.value',
-                                    ],
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-            ];
+            // 调用查询构造器的分面搜索
+            $builder->aggregateProperties();
         }
 
         $propertyFilters = [];
-
-        // 从用户请求参数获取 filters
         if ($filterString = $request->input('filters')) {
-            // 将获取到的字符串用符号 | 拆分成数组
             $filterArray = explode('|', $filterString);
             foreach ($filterArray as $filter) {
-                // 将字符串用符号 : 拆分成两部分并且分别赋值给 $name 和 $value 两个变量
                 list($name, $value) = explode(':', $filter);
-                // 将用户筛选的属性添加到数组中
                 $propertyFilters[$name] = $value;
-
-                // 添加到 filter 类型中
-                $params['body']['query']['bool']['filter'][] = [
-                    // 由于我们要筛选的是 nested 类型下的属性，因此需要用 nested 查询
-                    'nested' => [
-                        // 指明 nested 字段
-                        'path'  => 'properties',
-                        'query' => [
-                            ['term' => ['properties.name' => $name]],
-                            ['term' => ['properties.value' => $value]],
-                        ],
-                    ],
-                ];
+                // 调用查询构造器的属性筛选
+                $builder->propertyFilter($name, $value);
             }
         }
 
-
-        // 是否有提交 order 参数，如果有就赋值给 $order 变量
-        // order 参数用来控制商品的排序规则
-        if($order = $request->input('order', '')) {
-            // 是否是以 _asc 或者 _desc 结尾
-            if(preg_match('/^(.+)_(asc|desc)$/', $order, $m)) {
-                // 如果字符串的开头是这 3 个字符串之一，说明是一个合法的排序值
-                if(in_array($m[1], ['price', 'sold_count', 'rating'])) {
-                    // 根据传入的排序值来构造排序参数
-                    $params['body']['sort'] = [[$m[1] => $m[2]]];
+        if ($order = $request->input('order', '')) {
+            if (preg_match('/^(.+)_(asc|desc)$/', $order, $m)) {
+                if (in_array($m[1], ['price', 'sold_count', 'rating'])) {
+                    // 调用查询构造器的排序
+                    $builder->orderBy($m[1], $m[2]);
                 }
             }
         }
 
 
-
-        $result     = app('es')->search($params);
+        $result     = app('es')->search($builder->getParams());
         $productIds = collect($result['hits']['hits'])->pluck('_id')->all();
         $products   = Product::query()
             ->whereIn('id', $productIds)
@@ -133,7 +88,7 @@ class ProductsController extends Controller
                 'search' => $search,
                 'order'  => $order,
             ],
-            'category' => null,
+            'category' => $category ?? null,
             'properties' => $properties,
             'propertyFilters' => $propertyFilters,
         ]);
